@@ -1,0 +1,158 @@
+version: "0.3.0"
+kind: app
+app:
+  name: "Cogitor — Document Parsing"
+  description: "Парсинг документов в Markdown + Smart Chunking v3"
+  icon: "📄"
+  icon_background: "#E8F4FD"
+  mode: workflow
+
+workflow:
+  graph:
+    nodes:
+      - id: "start"
+        type: start
+        data:
+          title: "Старт"
+          variables:
+            - variable: input_file
+              label: "Документ"
+              type: file
+              required: true
+              allowed_file_types: ["document"]
+              allowed_file_extensions: [".pdf",".docx",".xlsx",".txt",".md",".csv",".pptx"]
+        position: {x: 30, y: 200}
+
+      - id: "node-extractor"
+        type: document-extractor
+        data:
+          title: "Извлечь текст"
+          variable_selector: ["start", "input_file"]
+        position: {x: 300, y: 200}
+
+      - id: "node-llm"
+        type: llm
+        data:
+          title: "Текст → Markdown (LLM)"
+          model:
+            provider: openai
+            name: gpt-4o-mini
+            mode: chat
+            completion_params:
+              temperature: 0.1
+              max_tokens: 8000
+          prompt_list:
+            - role: system
+              text: |
+                Ты конвертируешь текст документа в чистый структурированный Markdown.
+                Используй заголовки h1-h6 для иерархии.
+                Сохраняй таблицы в формате Markdown.
+                Возвращай ТОЛЬКО Markdown без пояснений.
+            - role: user
+              text: "Преобразуй в Markdown:\n\n{{#node-extractor.text#}}"
+          context:
+            enabled: false
+        position: {x: 570, y: 200}
+
+      - id: "node-chunker"
+        type: code
+        data:
+          title: "Smart Chunking v3"
+          code_language: python3
+          code: |
+            import re
+
+            def main(markdown_text: str) -> dict:
+                MIN_SIZE = 80
+                chunks = []
+                idx = 0
+                current_heading = ""
+                section_lines = []
+
+                def flush(heading, lines, start_idx):
+                    result = []
+                    i = start_idx
+                    raw = []
+                    cur = []
+                    for line in lines:
+                        if line.strip() == "":
+                            if cur:
+                                raw.append("\n".join(cur))
+                                cur = []
+                        else:
+                            cur.append(line)
+                    if cur:
+                        raw.append("\n".join(cur))
+                    merged = []
+                    j = 0
+                    while j < len(raw):
+                        if len(raw[j]) < MIN_SIZE and j + 1 < len(raw):
+                            merged.append(raw[j] + "\n\n" + raw[j+1])
+                            j += 2
+                        else:
+                            merged.append(raw[j])
+                            j += 1
+                    for p in merged:
+                        if p.strip():
+                            result.append({"index": i, "heading": heading, "content": p.strip()})
+                            i += 1
+                    return result, i
+
+                for line in markdown_text.split("\n"):
+                    m = re.match(r"^(#{1,6})\s+(.+)", line)
+                    if m:
+                        if section_lines:
+                            new, idx = flush(current_heading, section_lines, idx)
+                            chunks.extend(new)
+                        current_heading = m.group(2).strip()
+                        section_lines = []
+                    else:
+                        section_lines.append(line)
+                if section_lines:
+                    new, idx = flush(current_heading, section_lines, idx)
+                    chunks.extend(new)
+
+                texts = [
+                    (f"{c['heading']}\n\n{c['content']}" if c["heading"] else c["content"])
+                    for c in chunks
+                ]
+                return {
+                    "chunks_count": len(chunks),
+                    "result": "\n\n---\n\n".join(texts)
+                }
+          variables:
+            - variable: markdown_text
+              value_selector: ["node-llm", "text"]
+          outputs:
+            chunks_count:
+              type: number
+            result:
+              type: string
+        position: {x: 840, y: 200}
+
+      - id: "end"
+        type: end
+        data:
+          title: "Результат"
+          outputs:
+            - variable: markdown
+              value_selector: ["node-llm", "text"]
+            - variable: chunks_count
+              value_selector: ["node-chunker", "chunks_count"]
+            - variable: chunks
+              value_selector: ["node-chunker", "result"]
+        position: {x: 1110, y: 200}
+
+    edges:
+      - id: e1
+        source: start
+        target: node-extractor
+      - id: e2
+        source: node-extractor
+        target: node-llm
+      - id: e3
+        source: node-llm
+        target: node-chunker
+      - id: e4
+        source: node-chunker
+        target: end
